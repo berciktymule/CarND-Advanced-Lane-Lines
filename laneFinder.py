@@ -72,23 +72,16 @@ class Tracker:
     pM = None
     rM = None
     radius = None
-
     ctr_offset = None
-
 
     def preprocess_image(self, img, s_thresh=(110, 255), sx_thresh=(20, 100)):
         img = np.copy(img)
 
-        #fig = plt.figure(figsize=(26, 16))
-        #plt.imshow(img)
-        #plt.show()
-
-        # Convert to HSV color space and separate the V channel
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HLS).astype(np.float)
-        l_channel = hsv[:,:,1]
-        s_channel = hsv[:,:,2]
+        hls = cv2.cvtColor(img, cv2.COLOR_BGR2HLS).astype(np.float)
+        l_channel = hls[:,:,1]
+        s_channel = hls[:,:,2]
         # Sobel x
-        sobelx = cv2.Sobel(l_channel, cv2.CV_64F, 1, 0, ksize = 31) # Take the derivative in x
+        sobelx = cv2.Sobel(l_channel, cv2.CV_64F, 1, 0, ksize = 31) # big kernel cleans the output a lot
         abs_sobelx = np.absolute(sobelx) # Absolute x derivative to accentuate lines away from horizontal
         scaled_sobel = np.uint8(255*abs_sobelx/np.max(abs_sobelx))
 
@@ -99,57 +92,35 @@ class Tracker:
         # Threshold color channel
         s_binary = np.zeros_like(s_channel)
         s_binary[(s_channel >= s_thresh[0]) & (s_channel <= s_thresh[1])] = 1
-        # Stack each channel
-        # Note color_binary[:, :, 0] is all 0s, effectively an all black image. It might
-        # be beneficial to replace this channel with something else.
-        color_binary = np.dstack(( np.zeros_like(sxbinary), sxbinary, s_binary))
 
         combined_binary = np.zeros_like(scaled_sobel)
         combined_binary[(sxbinary == 1) | (s_binary == 1)] = 1
 
-        #dst = cv2.undistort(combined_binary, mtx, dist, None, mtx)
-        #dst = self.calibrator.correct_image(combined_binary)
         return combined_binary
 
     def make_paralel(self, img):
         img_width, img_height = (img.shape[1], img.shape[0])
+
         if self.pM is  None:
-            #bottom_width = 0.11
-            #top_width = 0.0245
-            #height = 0.7
-
-            #bottom_width = 0.09
-            #top_width = 0.0165
-            #height = 0.66
-
-            #bottom_width = 0.09
-            #top_width = 0.0098
-            #height = 0.63
-            #bottom_width = 0.105
-            #top_width = 0.012
-            #height = 0.63
-            #bottom_trim = 23
-
-            bottom_width = 0.105
-            top_width = 0.0148
-            height = 0.63
+            trapezoid_bottom_to_image_width_ratio = 0.105
+            trapezoid_top_to_image_width_ratio = 0.0148
+            trapezoid_height_to_image_heigth_ratio = 0.63
             bottom_trim = 55
 
             src = np.float32([
-            [img_width * (0.5 - top_width/2), img_height * height],
-            [img_width * (0.5 + top_width/2), img_height * height],
-            [img_width * (0.5 + bottom_width/2), img_height - bottom_trim ],
-            [img_width * (0.5 - bottom_width/2), img_height - bottom_trim ]])
-            offset = img_width * 0.45
+            [img_width * (0.5 - trapezoid_top_ratio/2), img_trapezoid_height_to_image_heigth_ratio * trapezoid_height_to_image_heigth_ratio],
+            [img_width * (0.5 + trapezoid_top_ratio/2), img_height * trapezoid_height_to_image_heigth_ratio],
+            [img_width * (0.5 + trapezoid_bottom_to_image_width_ratio/2), img_height - bottom_trim ],
+            [img_width * (0.5 - trapezoid_bottom_to_image_width_ratio/2), img_height - bottom_trim ]])
+            lane_margin_ratio = img_width * 0.45
             dst = np.float32([
-                [offset, 0],
-                [img_width - offset, 0],
-                [img_width - offset, img_height],
-                [offset, img_height ]
+                [lane_margin_ratio, 0],
+                [img_width - lane_margin_ratio, 0],
+                [img_width - lane_margin_ratio, img_height],
+                [lane_margin_ratio, img_height ]
                 ])
             self.pM = cv2.getPerspectiveTransform(src, dst)
             self.rM = cv2.getPerspectiveTransform(dst, src)
-            #print(img.shape[1::-1])
         warped = cv2.warpPerspective(img, self.pM,  (int(img_width), img_height))
         return warped
 
@@ -170,12 +141,9 @@ class Tracker:
         leftx_base = np.argmax(histogram[:midpoint]) or 0
         rightx_base = np.argmax(histogram[midpoint:]) + midpoint or binary_warped.shape[0]
 
-        #print (histogram[50:600].shape)
-        #print(binary_warped.shape)
-        #print (leftx_base, midpoint, rightx_base)
         # Choose the number of sliding windows
         nwindows = 9
-        # Set height of windows
+        # Set trapezoid_height_to_image_heigth_ratio of windows
         window_height = np.int(binary_warped.shape[0]/nwindows)
         # Identify the x and y positions of all nonzero pixels in the image
         nonzero = binary_warped.nonzero()
@@ -231,7 +199,7 @@ class Tracker:
         right_fit = np.polyfit(righty, rightx, 2)
         return out_img, left_fit, right_fit
 
-    def findLanesWithPrevious(self, binary_warped, old_left_fit, old_right_fit):
+    def find_lanes_using_existing_fits(self, binary_warped, old_left_fit, old_right_fit):
         out_img = np.dstack((binary_warped, binary_warped, binary_warped))*255
         # from the next frame of video (also called "binary_warped")
         # It's now much easier to find line pixels!
@@ -296,9 +264,10 @@ class Tracker:
         right_curverad = ((1 + (2*right_fit[0]*y_eval + right_fit[1])**2)**1.5) / np.absolute(2*right_fit[0])
 
         # Define conversions in x and y from pixels space to meters
-        ym_per_pix = 30/720 # meters per pixel in y dimension
-        xm_per_pix = 3.7/700 # meters per pixel in x dimension
-        xm_per_pix = 3.7 /(right_fitx[-1] - left_fitx[-1])
+        #ym_per_pix = 30/720 # meters per pixel in y dimension (Per udacity)
+        #xm_per_pix = 3.7/700 # meters per pixel in x dimension (Per udacity)
+        ym_per_pix = 9.144/197 # meters per pixel in y dimension (I've measured a space between the lines that should be 30ft)
+        xm_per_pix = 3.7 /(right_fitx[-1] - left_fitx[-1]) # meters per pixel in x dimension (measured distance between lanes and they are are 12ft)
 
         # Fit new polynomials to x,y in world space
         left_fit_cr = np.polyfit(ploty*ym_per_pix, left_fitx*xm_per_pix, 2)
@@ -318,21 +287,11 @@ class Tracker:
     def pipeline(self, img):
         img = self.calibrator.correct_image(img)
 
-        #filename = "dump/" + str(time.time()) + ".jpg"
-        #cv2.imwrite(filename, img)
-
-        #b,g,r = cv2.split(img)
-        #clahe = cv2.createCLAHE(clipLimit=1.3, tileGridSize=(33,33))
-        #bc = clahe.apply(b)
-        #gc = clahe.apply(g)
-        #rc = clahe.apply(r)
-        #cl1 = cv2.merge((bc,gc,rc))
-        #parallel =  self.make_paralel(cl1)
         parallel =  self.make_paralel(img)
         preprocessed = self.preprocess_image(parallel)
 
         if self.left_fit is not None:
-            detected, self.left_fit, self.right_fit = self.findLanesWithPrevious(preprocessed, self.left_fit, self.right_fit)
+            detected, self.left_fit, self.right_fit = self.find_lanes_using_existing_fits(preprocessed, self.left_fit, self.right_fit)
         else:
             detected, self.left_fit, self.right_fit = self.histogram_based_detect_lane(preprocessed)
 
@@ -340,24 +299,24 @@ class Tracker:
 
         # Now our radius of curvature is in meters
         font = cv2.FONT_HERSHEY_SIMPLEX
-        cv2.putText(unwarped, 'Radius: ' + str(self.radius) + 'm, distance to center: ' + str(self.ctr_offset), (10, 50), font, 1,(255,255,255),2)
+        cv2.putText(unwarped, 'Radius: ' + str(self.radius) + 'm, distance to center: ' + str(self.ctr_offset) + 'm', (10, 50), font, 1,(255,255,255),2)
 
         combined =  cv2.addWeighted(img, 1, unwarped, 0.3, 0)
-        #ddf = np.dstack((preprocessed, preprocessed, preprocessed))*255
-        #combined =  cv2.addWeighted(combined, 1, ddf, 0.2, 0)
         return combined
 
-    def make_movie(self, input_path = "project_video.mp4", output_file = 'project_video_out.mp4'):
+    def make_movie(self, input_path = "project_video.mp4"):
+        output_file = 'out_' + input_path
         clip1 = VideoFileClip(input_path)
         #NOTE: this function expects color images!!
         clip = clip1.fl_image(self.pipeline)
         clip.write_videofile(output_file, audio=False)
 
-    def __init__(self):
-        #TODO: detect pickle and choose constructor
-        self.calibrator = Calibrator.fromCheckerboardImages()
-        #self.calibrator = Calibrator.fromPickle()
-
+    def __init__(self, calibration_piclke_path = 'calibration.p'):
+        import os.path
+        if (os.path.exists(calibration_piclke_path)):
+            self.calibrator = Calibrator.fromPickle(calibration_piclke_path)
+        else:
+            self.calibrator = Calibrator.fromCheckerboardImages()
 
 tracker = Tracker()
-tracker.make_movie()
+tracker.make_movie('project_video.mp4')
