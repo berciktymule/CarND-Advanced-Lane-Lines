@@ -34,7 +34,7 @@ class Calibrator:
         return cls(mtx, dist)
 
     @classmethod
-    def fromCheckerboardImages(cls, calibration_images_path = 'camera_cal/', nx = 9, ny = 5):
+    def fromCheckerboardImages(cls, calibration_images_path = 'camera_cal/', nx = 9, ny = 6):
         # prepare object points, like (0,0,0), (1,0,0), (2,0,0) ....,(6,5,0)
         objp = np.zeros((ny*nx,3), np.float32)
         objp[:,:2] = np.mgrid[0:nx,0:ny].T.reshape(-1,2)
@@ -65,18 +65,18 @@ class Calibrator:
         ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, img_size, None, None)
         return cls(mtx, dist)
 
-class Lane:
-    def __init__(self, realpart, imagpart):
-        left = 1
-
 class Tracker:
     left_fit = None
     right_fit = None
     calibrator = None
     pM = None
     rM = None
+    radius = None
 
-    def preprocess_image(self, img, s_thresh=(25, 255), sx_thresh=(16, 255)):
+    ctr_offset = None
+
+
+    def preprocess_image(self, img, s_thresh=(110, 255), sx_thresh=(20, 100)):
         img = np.copy(img)
 
         #fig = plt.figure(figsize=(26, 16))
@@ -88,7 +88,7 @@ class Tracker:
         l_channel = hsv[:,:,1]
         s_channel = hsv[:,:,2]
         # Sobel x
-        sobelx = cv2.Sobel(l_channel, cv2.CV_64F, 1, 0) # Take the derivative in x
+        sobelx = cv2.Sobel(l_channel, cv2.CV_64F, 1, 0, ksize = 31) # Take the derivative in x
         abs_sobelx = np.absolute(sobelx) # Absolute x derivative to accentuate lines away from horizontal
         scaled_sobel = np.uint8(255*abs_sobelx/np.max(abs_sobelx))
 
@@ -108,19 +108,33 @@ class Tracker:
         combined_binary[(sxbinary == 1) | (s_binary == 1)] = 1
 
         #dst = cv2.undistort(combined_binary, mtx, dist, None, mtx)
-        dst = self.calibrator.correct_image(combined_binary)
-        return dst
+        #dst = self.calibrator.correct_image(combined_binary)
+        return combined_binary
 
     def make_paralel(self, img):
         img_width, img_height = (img.shape[1], img.shape[0])
         if self.pM is  None:
-            #bottom_width = 0.76
-            #top_width = 0.85
-            #height = 0.62
-            bottom_width = 0.11
-            top_width = 0.0245
-            height = 0.7
-            bottom_trim = 23
+            #bottom_width = 0.11
+            #top_width = 0.0245
+            #height = 0.7
+
+            #bottom_width = 0.09
+            #top_width = 0.0165
+            #height = 0.66
+
+            #bottom_width = 0.09
+            #top_width = 0.0098
+            #height = 0.63
+            #bottom_width = 0.105
+            #top_width = 0.012
+            #height = 0.63
+            #bottom_trim = 23
+
+            bottom_width = 0.105
+            top_width = 0.0148
+            height = 0.63
+            bottom_trim = 55
+
             src = np.float32([
             [img_width * (0.5 - top_width/2), img_height * height],
             [img_width * (0.5 + top_width/2), img_height * height],
@@ -146,10 +160,6 @@ class Tracker:
         return unwarped;
 
     def histogram_based_detect_lane(self, binary_warped):
-        #fig = plt.figure(figsize=(26, 16))
-        #plt.imshow(binary_warped, cmap='gray')
-        #plt.show()
-        # Assuming you have created a warped binary image called "binary_warped"
         # Take a histogram of the bottom half of the image
         histogram = np.sum(binary_warped[int(binary_warped.shape[0]/2):,:], axis=0)
         # Create an output image to draw on and  visualize the result
@@ -160,9 +170,9 @@ class Tracker:
         leftx_base = np.argmax(histogram[:midpoint]) or 0
         rightx_base = np.argmax(histogram[midpoint:]) + midpoint or binary_warped.shape[0]
 
-        print (histogram[50:600].shape)
-        print(binary_warped.shape)
-        print (leftx_base, midpoint, rightx_base)
+        #print (histogram[50:600].shape)
+        #print(binary_warped.shape)
+        #print (leftx_base, midpoint, rightx_base)
         # Choose the number of sliding windows
         nwindows = 9
         # Set height of windows
@@ -221,30 +231,38 @@ class Tracker:
         right_fit = np.polyfit(righty, rightx, 2)
         return out_img, left_fit, right_fit
 
-    def findLanesWithPrevious(self, binary_warped, left_fit, right_fit):
+    def findLanesWithPrevious(self, binary_warped, old_left_fit, old_right_fit):
         out_img = np.dstack((binary_warped, binary_warped, binary_warped))*255
-        # Assume you now have a new warped binary image
         # from the next frame of video (also called "binary_warped")
         # It's now much easier to find line pixels!
         nonzero = binary_warped.nonzero()
         nonzeroy = np.array(nonzero[0])
         nonzerox = np.array(nonzero[1])
         margin = 30
-        left_lane_inds = ((nonzerox > (left_fit[0]*(nonzeroy**2) + left_fit[1]*nonzeroy + left_fit[2] - margin)) & (nonzerox < (left_fit[0]*(nonzeroy**2) + left_fit[1]*nonzeroy + left_fit[2] + margin)))
-        right_lane_inds = ((nonzerox > (right_fit[0]*(nonzeroy**2) + right_fit[1]*nonzeroy + right_fit[2] - margin)) & (nonzerox < (right_fit[0]*(nonzeroy**2) + right_fit[1]*nonzeroy + right_fit[2] + margin)))
+        left_lane_inds = ((nonzerox > (old_left_fit[0]*(nonzeroy**2) + old_left_fit[1]*nonzeroy + old_left_fit[2] - margin))
+        & (nonzerox < (old_left_fit[0]*(nonzeroy**2) + old_left_fit[1]*nonzeroy + old_left_fit[2] + margin)))
+        right_lane_inds = ((nonzerox > (old_right_fit[0]*(nonzeroy**2) + old_right_fit[1]*nonzeroy + old_right_fit[2] - margin))
+        & (nonzerox < (old_right_fit[0]*(nonzeroy**2) + old_right_fit[1]*nonzeroy + old_right_fit[2] + margin)))
 
         # Again, extract left and right line pixel positions
         leftx = nonzerox[left_lane_inds]
         lefty = nonzeroy[left_lane_inds]
         rightx = nonzerox[right_lane_inds]
         righty = nonzeroy[right_lane_inds]
+
         # Fit a second order polynomial to each
-        left_fit = np.polyfit(lefty, leftx, 2)
-        right_fit = np.polyfit(righty, rightx, 2)
-        # Generate x and y values for plotting
-        ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0] )
-        left_fitx = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
-        right_fitx = right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
+        #average between the old and new
+        #if empty, fall back
+        if (leftx.size == 0 or lefty.size == 0):
+            left_fit= old_left_fit
+        else:
+            left_fit = np.polyfit(lefty, leftx, 2)
+            left_fit = np.average( np.array([ old_left_fit, left_fit ]), axis=0, weights=[3, 1])
+        if (rightx.size == 0 or righty.size == 0):
+            right_fit = old_right_fit
+        else:
+            right_fit = np.polyfit(righty, rightx, 2)
+            right_fit = np.average( np.array([ old_right_fit, right_fit ]), axis=0, weights=[3, 1])
 
         #visualize
         ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0] )
@@ -266,25 +284,70 @@ class Tracker:
         cv2.fillPoly(window_img, np.int_([left_line_pts]), (0,255, 0))
         cv2.fillPoly(window_img, np.int_([right_line_pts]), (0,255, 0))
 
-        #reference
-        #result = cv2.addWeighted(out_img, 1, window_img, 0.3, 0)
+        #draw the lane
+        lane = np.hstack((left_line_window2, right_line_window1))
+        cv2.fillPoly(window_img, np.int_([lane]), (200,0, 200))
 
-        return window_img, left_fit, right_fit
+        result = cv2.addWeighted(out_img, 1, window_img, 0.9, 0)
+
+        #compute the radiuses of the lanes
+        y_eval = np.max(ploty)
+        left_curverad = ((1 + (2*left_fit[0]*y_eval + left_fit[1])**2)**1.5) / np.absolute(2*left_fit[0])
+        right_curverad = ((1 + (2*right_fit[0]*y_eval + right_fit[1])**2)**1.5) / np.absolute(2*right_fit[0])
+
+        # Define conversions in x and y from pixels space to meters
+        ym_per_pix = 30/720 # meters per pixel in y dimension
+        xm_per_pix = 3.7/700 # meters per pixel in x dimension
+        xm_per_pix = 3.7 /(right_fitx[-1] - left_fitx[-1])
+
+        # Fit new polynomials to x,y in world space
+        left_fit_cr = np.polyfit(ploty*ym_per_pix, left_fitx*xm_per_pix, 2)
+        right_fit_cr = np.polyfit(ploty*ym_per_pix, right_fitx*xm_per_pix, 2)
+        # Calculate the new radii of curvature
+        l_radius = ((1 + (2*left_fit_cr[0]*y_eval*ym_per_pix + left_fit_cr[1])**2)**1.5) / np.absolute(2*left_fit_cr[0])
+        r_radius = ((1 + (2*right_fit_cr[0]*y_eval*ym_per_pix + right_fit_cr[1])**2)**1.5) / np.absolute(2*right_fit_cr[0])
+        self.radius = round((l_radius + r_radius) / 2, 2)
+
+        center = (left_fitx[-1] + right_fitx[-1]) / 2
+        img_center = result.shape[1]/2
+        px_offet = img_center - center
+        self.ctr_offset = round(px_offet * xm_per_pix, 2)
+
+        return result, left_fit, right_fit
 
     def pipeline(self, img):
-        #hls = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float)
+        img = self.calibrator.correct_image(img)
+
         #filename = "dump/" + str(time.time()) + ".jpg"
-        #cv2.imwrite(filename, hls)
-        ready_to_process = self.make_paralel(self.preprocess_image(img))
+        #cv2.imwrite(filename, img)
+
+        #b,g,r = cv2.split(img)
+        #clahe = cv2.createCLAHE(clipLimit=1.3, tileGridSize=(33,33))
+        #bc = clahe.apply(b)
+        #gc = clahe.apply(g)
+        #rc = clahe.apply(r)
+        #cl1 = cv2.merge((bc,gc,rc))
+        #parallel =  self.make_paralel(cl1)
+        parallel =  self.make_paralel(img)
+        preprocessed = self.preprocess_image(parallel)
+
         if self.left_fit is not None:
-            detected, self.left_fit, self.right_fit = self.findLanesWithPrevious(ready_to_process, self.left_fit, self.right_fit)
+            detected, self.left_fit, self.right_fit = self.findLanesWithPrevious(preprocessed, self.left_fit, self.right_fit)
         else:
-            detected, self.left_fit, self.right_fit = self.histogram_based_detect_lane(ready_to_process)
+            detected, self.left_fit, self.right_fit = self.histogram_based_detect_lane(preprocessed)
+
         unwarped = self.reverse_perspective(detected)
+
+        # Now our radius of curvature is in meters
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(unwarped, 'Radius: ' + str(self.radius) + 'm, distance to center: ' + str(self.ctr_offset), (10, 50), font, 1,(255,255,255),2)
+
         combined =  cv2.addWeighted(img, 1, unwarped, 0.3, 0)
+        #ddf = np.dstack((preprocessed, preprocessed, preprocessed))*255
+        #combined =  cv2.addWeighted(combined, 1, ddf, 0.2, 0)
         return combined
 
-    def make_movie(self, input_path = "project_video.mp4", output_file = 'white.mp4'):
+    def make_movie(self, input_path = "project_video.mp4", output_file = 'project_video_out.mp4'):
         clip1 = VideoFileClip(input_path)
         #NOTE: this function expects color images!!
         clip = clip1.fl_image(self.pipeline)
@@ -292,8 +355,8 @@ class Tracker:
 
     def __init__(self):
         #TODO: detect pickle and choose constructor
-        #self.calibrator = Calibrator.fromCheckerboardImages()
-        self.calibrator = Calibrator.fromPickle()
+        self.calibrator = Calibrator.fromCheckerboardImages()
+        #self.calibrator = Calibrator.fromPickle()
 
 
 tracker = Tracker()
